@@ -44,5 +44,17 @@
     }
   ],
   "upstream_mint_commit": "1bd21e4edd6d5d2d59789ce64ee5450de24a7c2b",
-  "purpose": "Pinned current rules; entry point overrides S2/S3/S4 thresholds explicitly in pipeline.py"
+  "purpose": "Pinned current rules; entry point overrides S2/S3/S4 thresholds explicitly in pipeline.py",
+  "annotation_implementation": {
+    "version": "egostandard-labels-and-timelines-v2-independent-union",
+    "evaluation": "S1/S2 prefix, independent S4 and optional S3 on identical retained intervals, union, S4-first attribution, all matches retained",
+    "modified_entry_files": [
+      "pipeline.py",
+      "run.py",
+      "run.sh",
+      "tests/test_pipeline.py",
+      "tests/audit_integration.py"
+    ],
+    "rules_changed": false
+  }
 }

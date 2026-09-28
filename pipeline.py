@@ -1,4 +1,4 @@
-"""S1 repaired labels and sequential S1/S2/(S3)/S4 original-video annotations."""
+"""S1/S2 prefix followed by independent S4 and optional S3, then interval union."""
 import os
 for _key in ('OPENBLAS_NUM_THREADS', 'OMP_NUM_THREADS', 'MKL_NUM_THREADS'):
     os.environ[_key] = '1'
@@ -23,7 +23,7 @@ import edge_rule as edge
 import camera_rule as motion
 from cosine_rule import Config as CarryConfig, detect as carry_detect
 
-VERSION = 'egostandard-labels-and-timelines-v1'
+VERSION = 'egostandard-labels-and-timelines-v2-independent-union'
 FPS = 30
 SIDES = ('left', 'right')
 VIEWS = ('camera_reference', 'camera_aux_0')
@@ -40,8 +40,17 @@ RULE_CONFIG = {
     'S2': dict(edge.CONFIG),
     'S3': {'window_seconds': .2, 'window_frame_gap': 6,
            'translation_threshold_m': S3_TRANSLATION_M, 'rotation_threshold_deg': S3_ROTATION_DEG,
-           'comparison': 'strictly greater than', 'interval': 'include both endpoint images and all between'},
-    'S4': S4_CONFIG.json(),
+           'comparison': 'strictly greater than', 'interval': 'include both endpoint images and all between',
+           'evaluation_domain': 'same contiguous intervals retained by S1 and S2 as S4'},
+    'S4': dict(S4_CONFIG.json(), evaluation_domain='contiguous intervals retained by S1 and S2; independent of S3'),
+}
+ANNOTATION_POLICY = {
+    'mode': 's1_s2_then_independent_s4_s3_union',
+    'computation_order': ['S1', 'S2', 'S4', 'S3'],
+    'primary_attribution_priority': ['S1', 'S2', 'S4', 'S3'],
+    's3_s4_input': 'Identical contiguous intervals retained after S1 and S2; neither sees the other rule output',
+    'final_rejection': 'Union of S1, S2, S3 and S4 detections; count each source frame once',
+    'all_matches': 'Record every matching rule and translation/rotation branch, including S3/S4 overlap',
 }
 REASONS = {0: '', 1: 'S1_unrepairable_trajectory_or_terminal_action',
            2: 'S2_bilateral_edge_or_out_of_frame',
@@ -243,7 +252,28 @@ def write_label(table,target):
 
 
 def stages_for(skip_s3):
-    return ('S1','S2','S4') if skip_s3 else ('S1','S2','S3','S4')
+    return ('S1','S2','S4') if skip_s3 else ('S1','S2','S4','S3')
+
+
+def configure_s3(translation_m, rotation_deg):
+    if not np.isfinite(translation_m) or translation_m <= 0:
+        raise ValueError('S3 translation threshold must be finite and positive')
+    if not np.isfinite(rotation_deg) or not 0 < rotation_deg < 180:
+        raise ValueError('S3 rotation threshold must be between 0 and 180 degrees')
+    global S3_TRANSLATION_M, S3_ROTATION_DEG
+    S3_TRANSLATION_M, S3_ROTATION_DEG = float(translation_m), float(rotation_deg)
+    RULE_CONFIG['S3'].update(translation_threshold_m=S3_TRANSLATION_M, rotation_threshold_deg=S3_ROTATION_DEG)
+
+
+def annotation_fingerprint(skip_s3):
+    config = {'version': VERSION, 'rules': RULE_CONFIG, 'policy': ANNOTATION_POLICY, 'skip_s3': bool(skip_s3)}
+    return hashlib.sha256(json.dumps(config, sort_keys=True, allow_nan=False).encode()).hexdigest()
+
+
+def reason_stage(code):
+    if code not in REASONS or code == 0:
+        raise ValueError('Expected a nonzero matching reason code')
+    return f'S{code if code < 10 else code//10}'
 
 
 def detect_s2(kept,position,ext,intr):
@@ -274,7 +304,7 @@ def detect_s4(kept,position,ext,n):
     return [[a,b] for a,b in runs(bits!=0)],bits
 
 
-def annotate(table,row,s1,skip_s3=False):
+def annotate_details(table,row,s1,skip_s3=False):
     validate_source_rows(table,row)
     n=len(table)
     ext=edge.array(table,EXT,(4,4)).astype(np.float64)
@@ -293,11 +323,11 @@ def annotate(table,row,s1,skip_s3=False):
     reason=np.zeros(n,np.uint8)
     kept=[[0,n]]
     stages={}
-    for stage in stages_for(skip_s3):
-        if stage=='S1': removed=s1; branch=None
-        elif stage=='S2': removed=detect_s2(kept,position,ext,row['camera_intrinsics']['camera_reference']);branch=None
-        elif stage=='S3': removed,branch=detect_s3(kept,ext,n)
-        else: removed,branch=detect_s4(kept,position,ext,n)
+    def claim(stage,matched,branch,detection_input):
+        nonlocal kept
+        # Attribution is disjoint; raw matched intervals remain recorded below.
+        # For S3, subtract the S4 output only after both independent detections.
+        removed = subtract(matched, stages['S4']['removed_intervals']) if stage=='S3' else matched
         before=sum(b-a for a,b in kept)
         next_kept=subtract(kept,removed)
         after=sum(b-a for a,b in next_kept)
@@ -307,14 +337,58 @@ def annotate(table,row,s1,skip_s3=False):
             if not 0<=a<b<=n or np.any(codes[a:b]): raise AssertionError((stage,'overlap or bounds'))
             codes[a:b]=number
             reason[a:b]=number if branch is None else number*10+branch[a:b]
+        matched_frames = sum(b-a for a,b in matched)
         stages[stage]={'input_segments':len(kept),'input_frames':before,'removed_intervals':removed,
-                       'removed_frames':before-after,'kept_segments':len(next_kept),'kept_frames':after}
+                       'removed_frames':before-after,'kept_segments':len(next_kept),'kept_frames':after,
+                       'detection_input_segments':len(detection_input),
+                       'detection_input_frames':sum(b-a for a,b in detection_input),
+                       'matched_intervals':matched,'matched_frames':matched_frames,
+                       'overlap_frames':matched_frames-(before-after)}
         kept=next_kept
-    changes=np.r_[0,np.flatnonzero((codes[1:]!=codes[:-1])|(reason[1:]!=reason[:-1]))+1,n]
+
+    claim('S1',s1,None,kept)
+    s2=detect_s2(kept,position,ext,row['camera_intrinsics']['camera_reference'])
+    claim('S2',s2,None,kept)
+    common_input=[span[:] for span in kept]
+    # Both detectors receive this exact same input. In particular, S3 does not
+    # receive S4's remaining spans, and S4 is never recomputed after S3.
+    s4,s4_bits=detect_s4(common_input,position,ext,n)
+    if skip_s3:
+        s3,s3_bits=[],np.zeros(n,np.uint8)
+    else:
+        s3,s3_bits=detect_s3(common_input,ext,n)
+    claim('S4',s4,s4_bits,common_input)
+    if not skip_s3:
+        claim('S3',s3,s3_bits,common_input)
+    overlap=int(np.count_nonzero((s3_bits!=0)&(s4_bits!=0)))
+    if not skip_s3 and overlap != stages['S3']['overlap_frames']:
+        raise AssertionError('S3/S4 overlap accounting differs')
+    changes=np.r_[0,np.flatnonzero((codes[1:]!=codes[:-1])|(reason[1:]!=reason[:-1])
+                                   |(s3_bits[1:]!=s3_bits[:-1])|(s4_bits[1:]!=s4_bits[:-1]))+1,n]
     timeline=[[int(a),int(b),int(codes[a]),int(reason[a])] for a,b in zip(changes[:-1],changes[1:])]
+    rule_timeline=[]
+    for a,b,code,primary_reason in timeline:
+        if code in (1,2):
+            matches=[code]
+        else:
+            matches=([40+int(s4_bits[a])] if s4_bits[a] else [])+([30+int(s3_bits[a])] if s3_bits[a] else [])
+        if (bool(matches) != bool(code) or (matches and matches[0] != primary_reason)
+            or any(match not in REASONS for match in matches)):
+            raise AssertionError('Primary attribution and full rule matches differ')
+        rule_timeline.append([a,b,matches])
     if sum(b-a for a,b,_,_ in timeline)!=n or any(x[3] not in REASONS for x in timeline):
         raise AssertionError('Timeline partition mismatch')
-    return stages,kept,timeline
+    if sum(x['removed_frames'] for x in stages.values())+sum(b-a for a,b in kept)!=n:
+        raise AssertionError('Final union frame conservation failed')
+    return {'stages':stages,'accepted_intervals':kept,'timeline':timeline,
+            'rule_timeline':rule_timeline,'s3_s4_overlap_frames':overlap,
+            'annotation_version':VERSION,'annotation_config_sha256':annotation_fingerprint(skip_s3)}
+
+
+def annotate(table,row,s1,skip_s3=False):
+    """Keep the three-value API; full match information is in annotate_details."""
+    result=annotate_details(table,row,s1,skip_s3)
+    return result['stages'],result['accepted_intervals'],result['timeline']
 
 
 def label_record(source,output,row):
@@ -341,6 +415,9 @@ def process_batch(job):
             cached=[json.loads(line) for line in stream]
         if len(cached)!=len(rows): raise ValueError('Checkpoint length mismatch')
         for rec,row in zip(cached,rows):
+            if (rec.get('annotation_version')!=VERSION
+                or rec.get('annotation_config_sha256')!=annotation_fingerprint(skip_s3)):
+                raise ValueError('Checkpoint annotation version/config differs; use a matching run or new output')
             if rec['source_episode_index']!=int(row['episode_index']): raise ValueError('Checkpoint indexing mismatch')
             if identity(Path(source)/rec['label_relative_path'])!=rec['source_data_identity']: raise ValueError('Source changed since checkpoint')
             if identity(Path(output)/'labels_s1'/rec['label_relative_path'])!=rec['repaired_label_identity']: raise ValueError('Output label changed since checkpoint')
@@ -356,8 +433,7 @@ def process_batch(job):
             target=Path(output)/'labels_s1'/rec['label_relative_path']
             if identity(target)!=rec['repaired_label_identity']: raise ValueError('Repaired label changed since S1 export')
             table=pq.read_table(target,columns=FILTER_FIELDS,use_threads=False)
-        stage,kept,timeline=annotate(table,row,rec['s1_removed_intervals'],skip_s3)
-        rec.update(stages=stage,accepted_intervals=kept,timeline=timeline,videos=video_records(source,row))
+        rec.update(annotate_details(table,row,rec['s1_removed_intervals'],skip_s3),videos=video_records(source,row))
         records.append(rec)
     temp=batch_path.with_suffix('.jsonl.tmp')
     with temp.open('w') as stream:

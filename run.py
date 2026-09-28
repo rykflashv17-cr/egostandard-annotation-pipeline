@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export one S1 label copy and full original-episode S1/S2/(S3)/S4 timelines."""
+"""Export S1 labels and S1/S2 + independent S4/(S3) union timelines."""
 import os
 for _key in ('OPENBLAS_NUM_THREADS','OMP_NUM_THREADS','MKL_NUM_THREADS'):
     os.environ[_key]='1'
@@ -26,7 +26,7 @@ import pyarrow.parquet as pq
 import pipeline as p
 
 DEFAULT_SOURCE=Path('/mnt/pfs/datasets/Processed/Egostandard_stageA_260915_delay1_trunc/stage_a_aligned')
-DEFAULT_OUTPUT=Path('/mnt/pfs/Data/ryk/egostandard/runs/labels_annotations_20260928')
+DEFAULT_OUTPUT=Path('/mnt/pfs/Data/ryk/egostandard/runs/labels_annotations_independent_20260928')
 
 
 def prepare_label_metadata(source,output,rows,info,partial):
@@ -104,7 +104,8 @@ def export(args):
 def export_locked(args,source,output,rows,info,metadata_ids,initial):
     fingerprint={'version':p.VERSION,'source':str(source),'source_metadata_identity':metadata_ids,
                  'planned_episodes':len(rows),'planned_frames':initial,'partial_test_output':bool(args.limit),
-                 'code_sha256':p.code_hashes(),'rules':p.RULE_CONFIG,
+                 'code_sha256':p.code_hashes(),'rules':p.RULE_CONFIG,'annotation_policy':p.ANNOTATION_POLICY,
+                 'timeline_schema_version':2,'checkpoint_batch_size':args.batch_size,
                  'label_policy':'same rows and original dtypes; only audited EEF repairs plus quality flags',
                  'video_policy':'reference original files only; no open/write/link/cut/encode operations'}
     config_path=output/'config.json'
@@ -145,12 +146,13 @@ def export_locked(args,source,output,rows,info,metadata_ids,initial):
         prepare_label_metadata(source,output,rows,info,bool(args.limit))
     run={'status':'running','variant':variant,'stage_order':list(p.stages_for(args.skip_s3)),
          's3_enabled':not args.skip_s3,'s5_enabled':False,'source':str(source),'output':str(output),
+         'annotation_policy':p.ANNOTATION_POLICY,'timeline_schema_version':2,
          'label_reuse':reuse,'started_at_utc':p.now(),'planned_episodes':len(rows),'planned_frames':initial,
          'workers':args.workers,'batch_size':args.batch_size,'video_files_opened':0,'video_files_written':0}
     p.write_json(dest/'run.json',run)
     started=time.monotonic()
     stages={s:Counter() for s in p.stages_for(args.skip_s3)}
-    repairs=Counter();totals=Counter();reason_frames=Counter()
+    repairs=Counter();totals=Counter();reason_frames=Counter();matched_reason_frames=Counter()
     plan_digest=hashlib.sha256();s1_digest=hashlib.sha256()
     filenames=('plan.jsonl','timeline.csv.gz','rejected_intervals.csv.gz','episodes.csv.gz')
     with ExitStack() as stack:
@@ -161,7 +163,7 @@ def export_locked(args,source,output,rows,info,metadata_ids,initial):
         tw,rw,ew=csv.writer(timeline),csv.writer(rejected),csv.writer(episodes)
         timeline_fields=('source_episode_index','start_frame','end_frame_exclusive','start_seconds','end_seconds',
                          'duration_seconds','status','stage','reason','reference_mp4_start_seconds','reference_mp4_end_seconds',
-                         'aux_mp4_start_seconds','aux_mp4_end_seconds')
+                         'aux_mp4_start_seconds','aux_mp4_end_seconds','matched_stages','matched_reasons')
         tw.writerow(timeline_fields);rw.writerow(timeline_fields)
         ew.writerow(('source_episode_index','source_frames','duration_seconds','repaired_label_path',
                      'reference_video_path','reference_from_timestamp','reference_to_timestamp',
@@ -177,7 +179,9 @@ def export_locked(args,source,output,rows,info,metadata_ids,initial):
             line=json.dumps(rec,ensure_ascii=False,separators=(',',':'),allow_nan=False)+'\n'
             plan.write(line);plan_digest.update(line.encode())
             if s1_manifest is not None:
-                label_rec={k:v for k,v in rec.items() if k not in ('stages','accepted_intervals','timeline','videos')}
+                annotation_fields=('stages','accepted_intervals','timeline','rule_timeline','s3_s4_overlap_frames',
+                                   'annotation_version','annotation_config_sha256','videos')
+                label_rec={k:v for k,v in rec.items() if k not in annotation_fields}
                 label_line=json.dumps(label_rec,ensure_ascii=False,separators=(',',':'),allow_nan=False)+'\n'
                 s1_manifest.write(label_line);s1_digest.update(label_line.encode())
             n=rec['source_length']
@@ -186,24 +190,32 @@ def export_locked(args,source,output,rows,info,metadata_ids,initial):
             if invalid+accepted!=n:raise AssertionError('Episode frame conservation')
             totals.update(episodes=1,source_frames=n,rejected_frames=invalid,accepted_frames=accepted,
                           accepted_segments=len(rec['accepted_intervals']),affected_episodes=int(invalid>0),
-                          timeline_rows=len(rec['timeline']),label_bytes=rec['repaired_label_identity'][2])
+                          timeline_rows=len(rec['timeline']),label_bytes=rec['repaired_label_identity'][2],
+                          s3_s4_overlap_frames=rec['s3_s4_overlap_frames'])
             repairs.update(rec['repair_counts'])
             for s,stat in rec['stages'].items():
-                stages[s].update({k:v for k,v in stat.items() if k!='removed_intervals'})
-                stages[s]['removed_intervals']+=len(stat['removed_intervals'])
+                stages[s].update({k:v for k,v in stat.items() if k not in ('removed_intervals','matched_intervals')})
+                for field in ('removed_intervals','matched_intervals'):
+                    stages[s][field]+=len(stat[field])
             ref,aux=rec['videos']['camera_reference'],rec['videos']['camera_aux_0']
             ew.writerow((rec['source_episode_index'],n,f'{n/30:.6f}',str(label_root/rec['label_relative_path']),
                          ref['path'],ref['from_timestamp'],ref['to_timestamp'],
                          aux['path'],aux['from_timestamp'],aux['to_timestamp'],invalid,accepted))
             cursor=0
-            for a,b,code,reason in rec['timeline']:
+            if len(rec['rule_timeline'])!=len(rec['timeline']):raise AssertionError('Rule timeline length differs')
+            for (a,b,code,reason),(ma,mb,matches) in zip(rec['timeline'],rec['rule_timeline']):
                 if a!=cursor or not a<b<=n:raise AssertionError('Timeline gap or overlap')
+                if (a,b)!=(ma,mb) or bool(code)!=bool(matches) or (matches and matches[0]!=reason):
+                    raise AssertionError('Full rule matches and attribution differ')
                 cursor=b
                 row=(rec['source_episode_index'],a,b,f'{a/30:.6f}',f'{b/30:.6f}',f'{(b-a)/30:.6f}',
                      'reject' if code else 'keep',f'S{code}' if code else '',p.REASONS[reason],
                      f'{ref["from_timestamp"]+a/30:.6f}',f'{ref["from_timestamp"]+b/30:.6f}',
-                     f'{aux["from_timestamp"]+a/30:.6f}',f'{aux["from_timestamp"]+b/30:.6f}')
+                     f'{aux["from_timestamp"]+a/30:.6f}',f'{aux["from_timestamp"]+b/30:.6f}',
+                     ';'.join(p.reason_stage(match) for match in matches),
+                     ';'.join(p.REASONS[match] for match in matches))
                 tw.writerow(row)
+                for match in matches:matched_reason_frames[p.REASONS[match]]+=b-a
                 if code:
                     rw.writerow(row);totals['rejected_table_rows']+=1
                     reason_frames[p.REASONS[reason]]+=b-a
@@ -218,6 +230,8 @@ def export_locked(args,source,output,rows,info,metadata_ids,initial):
                                                         'elapsed_seconds','stage_removed_frames')}),flush=True)
     if totals['episodes']!=len(rows) or totals['source_frames']!=initial:raise AssertionError('Source coverage')
     if totals['accepted_frames']+totals['rejected_frames']!=initial:raise AssertionError('Full frame conservation')
+    if sum(v['matched_frames'] for v in stages.values())-totals['s3_s4_overlap_frames']!=totals['rejected_frames']:
+        raise AssertionError('Independent detection union conservation')
     if any(p.identity(source/rel)!=ident for rel,ident in metadata_ids.items()):raise RuntimeError('Source metadata changed')
     for name in filenames:(dest/(name+'.tmp')).replace(dest/name)
     if not reuse:
@@ -227,7 +241,8 @@ def export_locked(args,source,output,rows,info,metadata_ids,initial):
             'manifest_sha256':s1_digest.hexdigest(),'repair_counts':dict(repairs),
             'partial_test_output':bool(args.limit),'completed_at_utc':p.now(),
             'source_modified':False,'video_files_opened':0,'video_files_written':0})
-    stage_summary={s:dict(v,removed_seconds=v['removed_frames']/30) for s,v in stages.items()}
+    stage_summary={s:dict(v,removed_seconds=v['removed_frames']/30,matched_seconds=v['matched_frames']/30)
+                   for s,v in stages.items()}
     checksums={name:p.sha256(dest/name) for name in filenames}
     if checksums['plan.jsonl']!=plan_digest.hexdigest():raise AssertionError('Plan checksum mismatch')
     summary=dict(run,status='complete',completed_at_utc=p.now(),elapsed_seconds=time.monotonic()-started,
@@ -236,6 +251,8 @@ def export_locked(args,source,output,rows,info,metadata_ids,initial):
                  total_removed_seconds=totals['rejected_frames']/30,removed_share=totals['rejected_frames']/initial,
                  accepted_frames=totals['accepted_frames'],accepted_seconds=totals['accepted_frames']/30,
                  label_bytes=totals['label_bytes'],reason_removed_frames=dict(reason_frames),
+                 reason_matched_frames=dict(matched_reason_frames),s3_s4_overlap_frames=totals['s3_s4_overlap_frames'],
+                 s3_s4_overlap_seconds=totals['s3_s4_overlap_frames']/30,
                  plan_sha256=checksums['plan.jsonl'],checksums=checksums,partial_test_output=bool(args.limit),
                  rule_config=p.RULE_CONFIG,label_path=str(label_root),timeline_path=str(dest/'timeline.csv.gz'),
                  timeline_basis='original source episode frames, [start,end); source MP4 offsets also recorded')
@@ -257,11 +274,17 @@ def main():
     parser.add_argument('--workers',type=int,default=min(64,os.cpu_count() or 1))
     parser.add_argument('--batch-size',type=int,default=32)
     parser.add_argument('--skip-s3',action='store_true',help='Run S1 -> S2 -> S4; reuse completed S1 labels')
+    parser.add_argument('--s3-translation-cm',type=float,default=p.S3_TRANSLATION_M*100,
+                        help='S3 0.2-second translation threshold in cm (strictly greater; default 7.5)')
+    parser.add_argument('--s3-rotation-deg',type=float,default=p.S3_ROTATION_DEG,
+                        help='S3 0.2-second SO(3) rotation threshold in degrees (strictly greater; default 7.5)')
     parser.add_argument('--resume',action='store_true',help='Continue an incomplete matching variant from checked batch checkpoints')
     parser.add_argument('--limit',type=int,default=0,help='Test only: first N episodes, 0 means full dataset')
     args=parser.parse_args()
     if min(args.workers,args.batch_size)<1 or args.limit<0:parser.error('Invalid workers/batch-size/limit')
     if sys.flags.optimize:parser.error('Do not use Python -O; validation assertions are required')
+    try:p.configure_s3(args.s3_translation_cm/100,args.s3_rotation_deg)
+    except ValueError as exc:parser.error(str(exc))
     try:export(args)
     except Exception as exc:
         output=args.output.resolve()
