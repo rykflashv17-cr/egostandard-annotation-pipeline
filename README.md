@@ -14,7 +14,7 @@ python run.py --source /path/to/stage_a_aligned --output /path/to/work/labels_an
 # 恢复同一版本的未完成任务：增加 --resume
 ```
 
-需要 Python ≥3.10；已在 Python 3.12.8、NumPy 2.5.2、SciPy 1.18.1、PyArrow 25.0.1 上验证。只运行功能测试无需真实数据；正式运行需要原数据的标签和元信息。
+请使用 Python 3.12；已在 Python 3.12.8、NumPy 2.5.2、SciPy 1.18.1、PyArrow 25.0.1 上验证。只运行功能测试无需真实数据；正式运行需要原数据的标签和元信息。
 
 部署版本已通过 5 项功能测试与 256 个真实 episode 的两模式集成验证：标签对齐、输出哈希、完整时间轴覆盖和 S3 关闭后的 S4 重算均通过。全量导出尚未启动。
 
