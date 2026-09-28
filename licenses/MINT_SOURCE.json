@@ -1,0 +1,31 @@
+{
+  "repository": "https://github.com/wuji-technology/wuji-ego-mint",
+  "commit": "1bd21e4edd6d5d2d59789ce64ee5450de24a7c2b",
+  "files": [
+    {
+      "upstream_path": "ego_pipeline/data_cleaning/cleaning_modules/block_outlier.py",
+      "local_file": "block_outlier.py",
+      "sha256": "46974b285bd07889a7e1c9f7e86e325535431160a5c8e9c0d72f2a36504774c7"
+    },
+    {
+      "upstream_path": "ego_pipeline/data_cleaning/cleaning_modules/slerp_rot.py",
+      "local_file": "slerp_rot.py",
+      "sha256": "32af78cffe1e4e1d0f6069bb616ae4783f28e5cbb2aae02536f5070d01317263"
+    },
+    {
+      "upstream_path": "ego_pipeline/data_cleaning/cleaning_modules/ukf_cam_smoothing.py",
+      "local_file": "ukf_cam_smoothing.py",
+      "sha256": "12ca372e31726c3f6e0a86132b28e5163e533a0dfd27ad55cabad59cbf6de253"
+    },
+    {
+      "upstream_path": "ego_pipeline/data_cleaning/final_clean.py",
+      "local_file": "final_clean.py",
+      "sha256": "b04154780d427afb37997f4d2240e8748d2c19e0ed3ca5a834139ac0054a451b"
+    },
+    {
+      "upstream_path": "LICENSE",
+      "local_file": "LICENSE",
+      "sha256": "5a46ae2c42053ace0c565f542c88aac361510fe586acdbc266d5a05c2714bee5"
+    }
+  ]
+}

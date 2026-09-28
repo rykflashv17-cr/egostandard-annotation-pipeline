@@ -1,0 +1,48 @@
+{
+  "rules": [
+    {
+      "pinned_file": "rules/detector.py",
+      "original_local_file": "process/trajectory_cleaning/detector.py",
+      "sha256": "d735f178314d52d0955f5eace1529ea39fa37975fa23586b7469cab214bb70d3",
+      "original_sha256": "d735f178314d52d0955f5eace1529ea39fa37975fa23586b7469cab214bb70d3",
+      "modification": "unchanged copy"
+    },
+    {
+      "pinned_file": "rules/repair_core.py",
+      "original_local_file": "process/trajectory_cleaning/repair_core.py",
+      "sha256": "2dac8acc24bf00664a20809d9c388e9d25bf222b7a54b91b8dc60d7d71441c96",
+      "original_sha256": "ff3cb2ee6380e02d6510cfd4903eb6f41082b081257f85182217808e6dd7dd66",
+      "modification": "Three exact action/state comparisons accept aligned NaN values; all finite comparisons remain exact."
+    },
+    {
+      "pinned_file": "rules/scan.py",
+      "original_local_file": "process/trajectory_cleaning/scan.py",
+      "sha256": "dd2743c0e196cade43aa389b861eb9dba7834902a760ee7f0d22ac22503c10b6",
+      "original_sha256": "dd2743c0e196cade43aa389b861eb9dba7834902a760ee7f0d22ac22503c10b6",
+      "modification": "unchanged copy"
+    },
+    {
+      "pinned_file": "rules/edge_rule.py",
+      "original_local_file": "process/remain2center/egostandard_bilateral_edge.py",
+      "sha256": "adb66a64b909f5af564c5c8303a2f40aecfa444e8d986ede09c9a742579bd790",
+      "original_sha256": "adb66a64b909f5af564c5c8303a2f40aecfa444e8d986ede09c9a742579bd790",
+      "modification": "unchanged copy"
+    },
+    {
+      "pinned_file": "rules/camera_rule.py",
+      "original_local_file": "process/camera_motion/scan_camera_motion.py",
+      "sha256": "c6825f004be4298b5ae19f85e90881790d532f574672998b4a3e15114d89bab7",
+      "original_sha256": "c6825f004be4298b5ae19f85e90881790d532f574672998b4a3e15114d89bab7",
+      "modification": "unchanged copy"
+    },
+    {
+      "pinned_file": "rules/cosine_rule.py",
+      "original_local_file": "process/cosine_carry/cosine_rule.py",
+      "sha256": "f866a90317a21e5d1111bd492d5dfe147b4218e5acb087121ae7ff6032babc8d",
+      "original_sha256": "f866a90317a21e5d1111bd492d5dfe147b4218e5acb087121ae7ff6032babc8d",
+      "modification": "unchanged copy"
+    }
+  ],
+  "upstream_mint_commit": "1bd21e4edd6d5d2d59789ce64ee5450de24a7c2b",
+  "purpose": "Pinned current rules; entry point overrides S2/S3/S4 thresholds explicitly in pipeline.py"
+}
