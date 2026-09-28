@@ -174,6 +174,11 @@ class PipelineTests(unittest.TestCase):
             checkpoint=base/'batch.jsonl'
             job=(str(source),str(output),[row],False,str(checkpoint),None,False)
             records=p.process_batch(job)
+            record=records[0]
+            timings={**record['label_timings_seconds'],**record['annotation_timings_seconds']}
+            self.assertTrue(all(np.isfinite(value) and value>=0 for value in timings.values()))
+            self.assertTrue({'S1_detect_repair_validate','S2_detection','S3_detection','S4_detection'}<=set(timings))
+            self.assertLessEqual(sum(timings.values()),record['episode_worker_seconds']+1e-6)
             with patch.object(p,'label_record',side_effect=AssertionError('Labels rewritten')):
                 cached=p.process_batch((*job[:-1],True))
             self.assertEqual(records,cached)

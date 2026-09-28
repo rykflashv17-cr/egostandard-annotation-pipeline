@@ -85,27 +85,31 @@ def ordered_records(pool,source,output,rows,skip,checkpoint,reuse_stream,resume,
 
 
 def export(args):
+    started=time.perf_counter()
     source,output=args.source.resolve(),args.output.resolve()
     if source==output or source in output.parents or output in source.parents:
         raise ValueError('Output must be independent of source')
     if not source.is_dir(): raise FileNotFoundError(source)
     rows,info,metadata_ids=p.load_metadata(source)
+    metadata_seconds=time.perf_counter()-started
     if args.limit:rows=rows.slice(0,min(args.limit,len(rows)))
     initial=int(np.asarray(rows['length']).sum())
     output.mkdir(parents=True,exist_ok=True)
     lock=(output/'.pipeline.lock').open('a')
     fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     try:
-        return export_locked(args,source,output,rows,info,metadata_ids,initial)
+        return export_locked(args,source,output,rows,info,metadata_ids,initial,started,metadata_seconds)
     finally:
         fcntl.flock(lock,fcntl.LOCK_UN);lock.close()
 
 
-def export_locked(args,source,output,rows,info,metadata_ids,initial):
+def export_locked(args,source,output,rows,info,metadata_ids,initial,started,metadata_seconds):
+    preparation_started=time.perf_counter()
     fingerprint={'version':p.VERSION,'source':str(source),'source_metadata_identity':metadata_ids,
                  'planned_episodes':len(rows),'planned_frames':initial,'partial_test_output':bool(args.limit),
                  'code_sha256':p.code_hashes(),'rules':p.RULE_CONFIG,'annotation_policy':p.ANNOTATION_POLICY,
-                 'timeline_schema_version':2,'checkpoint_batch_size':args.batch_size,
+                 'timeline_schema_version':2,'timing_schema_version':p.TIMING_SCHEMA_VERSION,
+                 'checkpoint_batch_size':args.batch_size,
                  'label_policy':'same rows and original dtypes; only audited EEF repairs plus quality flags',
                  'video_policy':'reference original files only; no open/write/link/cut/encode operations'}
     config_path=output/'config.json'
@@ -150,7 +154,10 @@ def export_locked(args,source,output,rows,info,metadata_ids,initial):
          'label_reuse':reuse,'started_at_utc':p.now(),'planned_episodes':len(rows),'planned_frames':initial,
          'workers':args.workers,'batch_size':args.batch_size,'video_files_opened':0,'video_files_written':0}
     p.write_json(dest/'run.json',run)
-    started=time.monotonic()
+    coordinator_times={'source_metadata_load':metadata_seconds,
+                       'configuration_and_label_metadata':time.perf_counter()-preparation_started,
+                       'record_and_timeline_export':0.}
+    worker_times=Counter();worker_total=0.
     stages={s:Counter() for s in p.stages_for(args.skip_s3)}
     repairs=Counter();totals=Counter();reason_frames=Counter();matched_reason_frames=Counter()
     plan_digest=hashlib.sha256();s1_digest=hashlib.sha256()
@@ -175,12 +182,14 @@ def export_locked(args,source,output,rows,info,metadata_ids,initial):
         pool=stack.enter_context(ProcessPoolExecutor(max_workers=args.workers,mp_context=mp.get_context('fork')))
         for i,rec in enumerate(ordered_records(pool,source,output,rows,args.skip_s3,checkpoint,
                                               reused_manifest,args.resume,args.workers,args.batch_size),1):
+            export_started=time.perf_counter()
             if rec['source_episode_index']!=i-1:raise AssertionError('Ordered output episode mismatch')
             line=json.dumps(rec,ensure_ascii=False,separators=(',',':'),allow_nan=False)+'\n'
             plan.write(line);plan_digest.update(line.encode())
             if s1_manifest is not None:
                 annotation_fields=('stages','accepted_intervals','timeline','rule_timeline','s3_s4_overlap_frames',
-                                   'annotation_version','annotation_config_sha256','videos')
+                                   'annotation_version','annotation_config_sha256','videos',
+                                   'annotation_timings_seconds','episode_worker_seconds')
                 label_rec={k:v for k,v in rec.items() if k not in annotation_fields}
                 label_line=json.dumps(label_rec,ensure_ascii=False,separators=(',',':'),allow_nan=False)+'\n'
                 s1_manifest.write(label_line);s1_digest.update(label_line.encode())
@@ -193,6 +202,9 @@ def export_locked(args,source,output,rows,info,metadata_ids,initial):
                           timeline_rows=len(rec['timeline']),label_bytes=rec['repaired_label_identity'][2],
                           s3_s4_overlap_frames=rec['s3_s4_overlap_frames'])
             repairs.update(rec['repair_counts'])
+            if not reuse:worker_times.update(rec['label_timings_seconds'])
+            worker_times.update(rec['annotation_timings_seconds'])
+            worker_total+=rec['episode_worker_seconds']
             for s,stat in rec['stages'].items():
                 stages[s].update({k:v for k,v in stat.items() if k not in ('removed_intervals','matched_intervals')})
                 for field in ('removed_intervals','matched_intervals'):
@@ -223,11 +235,17 @@ def export_locked(args,source,output,rows,info,metadata_ids,initial):
             if i%1000==0 or i==len(rows):
                 plan.flush()
                 if s1_manifest is not None:s1_manifest.flush()
-                progress=dict(run,processed_episodes=i,elapsed_seconds=round(time.monotonic()-started,1),
-                              stage_removed_frames={s:stages[s]['removed_frames'] for s in stages})
+                progress=dict(run,processed_episodes=i,processed_frames=totals['source_frames'],
+                              elapsed_seconds=round(time.perf_counter()-started,1),
+                              stage_removed_frames={s:stages[s]['removed_frames'] for s in stages},
+                              stage_matched_frames={s:stages[s]['matched_frames'] for s in stages},
+                              s3_s4_overlap_frames=totals['s3_s4_overlap_frames'],
+                              worker_cumulative_seconds=dict(worker_times),label_bytes=totals['label_bytes'])
                 p.write_json(dest/'progress.json',progress)
                 print(json.dumps({k:progress[k] for k in ('status','variant','processed_episodes','planned_episodes',
                                                         'elapsed_seconds','stage_removed_frames')}),flush=True)
+            coordinator_times['record_and_timeline_export']+=time.perf_counter()-export_started
+    finalization_started=time.perf_counter()
     if totals['episodes']!=len(rows) or totals['source_frames']!=initial:raise AssertionError('Source coverage')
     if totals['accepted_frames']+totals['rejected_frames']!=initial:raise AssertionError('Full frame conservation')
     if sum(v['matched_frames'] for v in stages.values())-totals['s3_s4_overlap_frames']!=totals['rejected_frames']:
@@ -245,7 +263,16 @@ def export_locked(args,source,output,rows,info,metadata_ids,initial):
                    for s,v in stages.items()}
     checksums={name:p.sha256(dest/name) for name in filenames}
     if checksums['plan.jsonl']!=plan_digest.hexdigest():raise AssertionError('Plan checksum mismatch')
-    summary=dict(run,status='complete',completed_at_utc=p.now(),elapsed_seconds=time.monotonic()-started,
+    coordinator_times['final_validation_and_checksums']=time.perf_counter()-finalization_started
+    elapsed=time.perf_counter()-started
+    timing_summary={'schema_version':p.TIMING_SCHEMA_VERSION,'wall_elapsed_seconds':elapsed,
+                    'worker_cumulative_seconds':dict(worker_times),'worker_episode_total_seconds':worker_total,
+                    'coordinator_seconds':coordinator_times,'timed_episodes':totals['episodes'],
+                    'checkpoint_timings':'Resumed checkpoints retain their original episode timings.',
+                    'interpretation':'Worker elapsed seconds include I/O wait and are summed across concurrent episodes; '
+                                     'they are not sequential stage wall durations. Coordinator export overlaps worker processing.'}
+    p.write_json(dest/'timings.json',timing_summary)
+    summary=dict(run,status='complete',completed_at_utc=p.now(),elapsed_seconds=elapsed,timings=timing_summary,
                  processed_episodes=totals['episodes'],processed_frames=initial,stages=stage_summary,
                  repair_counts=dict(repairs),counts=dict(totals),total_removed_frames=totals['rejected_frames'],
                  total_removed_seconds=totals['rejected_frames']/30,removed_share=totals['rejected_frames']/initial,

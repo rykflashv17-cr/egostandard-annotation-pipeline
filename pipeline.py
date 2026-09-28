@@ -9,6 +9,7 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+import time
 
 import numpy as np
 import pyarrow as pa
@@ -24,6 +25,7 @@ import camera_rule as motion
 from cosine_rule import Config as CarryConfig, detect as carry_detect
 
 VERSION = 'egostandard-labels-and-timelines-v2-independent-union'
+TIMING_SCHEMA_VERSION = 1
 FPS = 30
 SIDES = ('left', 'right')
 VIEWS = ('camera_reference', 'camera_aux_0')
@@ -237,18 +239,32 @@ def arrays_equal(left,right):
     return left.equals(right)
 
 
-def write_label(table,target):
+def timed(timings,key,fn,*args,**kwargs):
+    started=time.perf_counter()
+    result=fn(*args,**kwargs)
+    timings[key]=timings.get(key,0.)+time.perf_counter()-started
+    return result
+
+
+def write_label(table,target,timings=None):
+    timings={} if timings is None else timings
+    started=time.perf_counter()
     target=Path(target)
     target.parent.mkdir(parents=True,exist_ok=True)
     temp=target.with_suffix('.parquet.tmp')
     pq.write_table(table,temp,compression='zstd',compression_level=1)
+    timings['label_write']=time.perf_counter()-started
+    started=time.perf_counter()
     saved=pq.read_table(temp,use_threads=False)
     if not table.schema.equals(saved.schema,check_metadata=True) or len(table)!=len(saved):
         raise AssertionError(('Output label schema/length mismatch',target))
     if any(not arrays_equal(table[name],saved[name]) for name in table.column_names):
         raise AssertionError(('Output label roundtrip mismatch',target))
     temp.replace(target)
-    return identity(target), sha256(target)
+    timings['label_readback_validate']=time.perf_counter()-started
+    label_identity=identity(target)
+    label_sha=timed(timings,'label_hash',sha256,target)
+    return label_identity,label_sha
 
 
 def stages_for(skip_s3):
@@ -266,7 +282,8 @@ def configure_s3(translation_m, rotation_deg):
 
 
 def annotation_fingerprint(skip_s3):
-    config = {'version': VERSION, 'rules': RULE_CONFIG, 'policy': ANNOTATION_POLICY, 'skip_s3': bool(skip_s3)}
+    config = {'version': VERSION, 'rules': RULE_CONFIG, 'policy': ANNOTATION_POLICY, 'skip_s3': bool(skip_s3),
+              'timing_schema_version':TIMING_SCHEMA_VERSION}
     return hashlib.sha256(json.dumps(config, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
 
@@ -305,6 +322,8 @@ def detect_s4(kept,position,ext,n):
 
 
 def annotate_details(table,row,s1,skip_s3=False):
+    started=time.perf_counter()
+    timings={}
     validate_source_rows(table,row)
     n=len(table)
     ext=edge.array(table,EXT,(4,4)).astype(np.float64)
@@ -347,16 +366,17 @@ def annotate_details(table,row,s1,skip_s3=False):
         kept=next_kept
 
     claim('S1',s1,None,kept)
-    s2=detect_s2(kept,position,ext,row['camera_intrinsics']['camera_reference'])
+    timings['annotation_prepare_validate']=time.perf_counter()-started
+    s2=timed(timings,'S2_detection',detect_s2,kept,position,ext,row['camera_intrinsics']['camera_reference'])
     claim('S2',s2,None,kept)
     common_input=[span[:] for span in kept]
     # Both detectors receive this exact same input. In particular, S3 does not
     # receive S4's remaining spans, and S4 is never recomputed after S3.
-    s4,s4_bits=detect_s4(common_input,position,ext,n)
+    s4,s4_bits=timed(timings,'S4_detection',detect_s4,common_input,position,ext,n)
     if skip_s3:
         s3,s3_bits=[],np.zeros(n,np.uint8)
     else:
-        s3,s3_bits=detect_s3(common_input,ext,n)
+        s3,s3_bits=timed(timings,'S3_detection',detect_s3,common_input,ext,n)
     claim('S4',s4,s4_bits,common_input)
     if not skip_s3:
         claim('S3',s3,s3_bits,common_input)
@@ -380,9 +400,11 @@ def annotate_details(table,row,s1,skip_s3=False):
         raise AssertionError('Timeline partition mismatch')
     if sum(x['removed_frames'] for x in stages.values())+sum(b-a for a,b in kept)!=n:
         raise AssertionError('Final union frame conservation failed')
+    timings['annotation_union_timeline_validate']=max(0.,time.perf_counter()-started-sum(timings.values()))
     return {'stages':stages,'accepted_intervals':kept,'timeline':timeline,
             'rule_timeline':rule_timeline,'s3_s4_overlap_frames':overlap,
-            'annotation_version':VERSION,'annotation_config_sha256':annotation_fingerprint(skip_s3)}
+            'annotation_version':VERSION,'annotation_config_sha256':annotation_fingerprint(skip_s3),
+            'annotation_timings_seconds':timings}
 
 
 def annotate(table,row,s1,skip_s3=False):
@@ -392,18 +414,19 @@ def annotate(table,row,s1,skip_s3=False):
 
 
 def label_record(source,output,row):
+    timings={}
     rel=data_relative(row)
     path=Path(source)/rel
     before=identity(path)
-    table=pq.read_table(path,use_threads=False)
-    cleaned,s1,counts,details=s1_repair(table,row)
+    table=timed(timings,'source_label_read',pq.read_table,path,use_threads=False)
+    cleaned,s1,counts,details=timed(timings,'S1_detect_repair_validate',s1_repair,table,row)
     target=Path(output)/'labels_s1'/rel
-    label_identity,label_sha=write_label(cleaned,target)
+    label_identity,label_sha=write_label(cleaned,target,timings)
     if identity(path)!=before: raise RuntimeError(('Source label changed',path))
     record={'source_episode_index':int(row['episode_index']),'source_length':int(row['length']),
             'source_data_identity':before,'label_relative_path':rel,'repaired_label_identity':label_identity,
             'repaired_label_sha256':label_sha,'repair_counts':counts,'s1_removed_intervals':s1,
-            'repair_details':details}
+            'repair_details':details,'label_timings_seconds':timings}
     return record,cleaned
 
 
@@ -424,6 +447,7 @@ def process_batch(job):
         return cached
     records=[]
     for i,row in enumerate(rows):
+        started=time.perf_counter()
         if reuse is None:
             rec,table=label_record(source,output,row)
         else:
@@ -434,6 +458,7 @@ def process_batch(job):
             if identity(target)!=rec['repaired_label_identity']: raise ValueError('Repaired label changed since S1 export')
             table=pq.read_table(target,columns=FILTER_FIELDS,use_threads=False)
         rec.update(annotate_details(table,row,rec['s1_removed_intervals'],skip_s3),videos=video_records(source,row))
+        rec['episode_worker_seconds']=time.perf_counter()-started
         records.append(rec)
     temp=batch_path.with_suffix('.jsonl.tmp')
     with temp.open('w') as stream:

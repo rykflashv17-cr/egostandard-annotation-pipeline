@@ -90,6 +90,7 @@ labels_annotations_independent_20260928/
       rejected_intervals.csv.gz     # 仅不合格区间
       episodes.csv.gz               # 标签和两个原 MP4 的对应关系
       summary.json                  # 独立命中、互斥归因、重叠与总量统计
+      timings.json                  # 总墙钟耗时、worker 分环节累计耗时、主进程导出耗时
       COMPLETE.json
       checkpoints/
     without_s3/                     # --skip-s3；共用 labels_s1
@@ -121,6 +122,12 @@ CSV 保留原有的 `source_episode_index`、`start_frame`、`end_frame_exclusiv
 `input_frames/segments` 和 `kept_frames/segments` 描述按主归因优先级应用标记后的状态；实际检测范围看 `detection_input_frames/segments`。启用 S3 时，它与 S4 的实际检测输入相同。
 
 汇总中的 `s3_s4_overlap_frames/seconds` 单独记录两条规则的交集。每个 episode 也保存 `s3_s4_overlap_frames`。S3 的 `overlap_frames` 表示命中但已主归因给 S4 的帧数。`reason_removed_frames` 是互斥主归因计数，`reason_matched_frames` 是完整规则命中计数。
+
+### 耗时记录
+
+`timings.json` 与 `summary.json.timings` 记录总墙钟耗时，以及原标签读取、S1 检测／修复／校验、标签写入、回读逐列校验、SHA-256、S2/S4/S3 检测、区间合并与时间表校验的 worker 累计耗时。各 episode 的明细在 `plan.jsonl` 的 `label_timings_seconds`、`annotation_timings_seconds`、`episode_worker_seconds` 中；S1 manifest 仅保留标签部分。
+
+worker 耗时含 I/O 等待，按 episode 累加。多个进程同时执行，因此不能把累计耗时当成每个阶段顺序运行的墙钟耗时，也不能与主进程导出时间相加得到总时间。主进程单独记录元信息准备、记录表导出、最后校验与校验和耗时。恢复任务时，检查点中的 episode 耗时保留原测量值；当前调用的墙钟耗时单独记录。复用已有 S1 标签时，不重复计入此前的 S1 导出耗时。
 
 ### 标签与训练读取
 
