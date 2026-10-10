@@ -24,7 +24,7 @@ VIEWS = {
     'camera_reference': ('reference_video_path', 'reference_from_timestamp'),
     'camera_aux_0': ('aux_video_path', 'aux_from_timestamp'),
 }
-VERSION = 's5-gop-splice-v1'
+VERSION = 's5-gop-splice-v2'
 
 
 def file_identity(path):
@@ -105,9 +105,14 @@ def encode_part(ffmpeg, source, seek_frame, start_frame, end_frame, target, crf,
     seek_seconds = f'{seek_frame / FPS:.9f}'
     video_filter = (f'trim=start_frame={start_frame-seek_frame}:'
                     f'end_frame={end_frame-seek_frame},setpts=PTS-STARTPTS')
+    # Tiny splice fragments are intra-only so they remain independently
+    # decodable. A full-clip fallback uses inter-frame compression to avoid
+    # turning a long episode into an enormous all-intra MP4.
+    gop, bframes = (1, 0) if mux == 'mpegts' else (30, 3)
     args = ['-ss', seek_seconds, '-i', source, '-map', '0:v:0', '-an', '-vf', video_filter,
-            '-frames:v', length, '-c:v', 'libx264', '-preset', preset, '-crf', crf,
-            '-pix_fmt', 'yuv420p', '-g', '1', '-bf', '0', '-threads', '1',
+            '-r', FPS, '-frames:v', length,
+            '-c:v', 'libx264', '-preset', preset, '-crf', crf,
+            '-pix_fmt', 'yuv420p', '-g', gop, '-bf', bframes, '-threads', '1',
             '-filter_threads', '1', '-f', mux]
     if mux == 'mp4':
         args += ['-movflags', '+faststart']
@@ -244,8 +249,10 @@ def splice_view(ffmpeg, source, output, start, end, keyframes, work, crf, preset
         validation = verify_clip(source, temp_output, start, end, None)
         method = 'full_reencode_fallback'
     temp_output.replace(output)
-    return dict(validation, method=method, fallback_reason=fallback_reason,
-                output_bytes=output.stat().st_size, output_identity=file_identity(output))
+    stats = dict(validation, method=method, fallback_reason=fallback_reason,
+                 output_bytes=output.stat().st_size, output_identity=file_identity(output))
+    shutil.rmtree(work)
+    return stats
 
 
 def output_path(root, view, episode, segment):
