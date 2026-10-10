@@ -1,8 +1,8 @@
-# EgoStandard 标签修复与不合格时间表管线
+# EgoStandard 标签修复、时间表与 S5 视频切分管线
 
 版本：`egostandard-labels-and-timelines-v2-independent-union`。
 
-S1、S2 依次执行；S4、S3 在 **同一份 S1/S2 保留轨迹**上独立检测，然后合并不合格区间。S3 可选。输出 S1 修复标签和逐原视频的完整合格／不合格时间表。
+S1、S2 依次执行；S4、S3 在 **同一份 S1/S2 保留轨迹**上独立检测，然后合并不合格区间。S3 可选。输出 S1 修复标签和逐原视频的完整合格／不合格时间表。新增的 S5 读取已完成的时间表，把每段连续合格区间导出为独立的双视角视频；不修改筛选规则。
 
 ```mermaid
 flowchart LR
@@ -14,9 +14,10 @@ flowchart LR
     E --> F
     B --> G[S1 修复标签]
     F --> H[原视频完整时间表]
+    H --> I[S5 按合格区间导出独立视频：可选]
 ```
 
-S4 先计算，S3 随后计算，二者都使用 S2 之后的连续保留区间。S3 的短暂命中不会打断 S4 的长窗口；S4 的标记也不会遮掉 S3 的边界窗口。S1/S2 不合格区间会加入最终并集。所有窗口均不跨越 S1/S2 已标记的间隙，没有 S5。
+S4 先计算，S3 随后计算，二者都使用 S2 之后的连续保留区间。S3 的短暂命中不会打断 S4 的长窗口；S4 的标记也不会遮掉 S3 的边界窗口。S1/S2 不合格区间会加入最终并集。所有窗口均不跨越 S1/S2 已标记的间隙。S5 是时间表完成后的独立导出命令，旧的 S1–S4 结果和配置指纹不变。
 
 ## 当前规则
 
@@ -138,6 +139,53 @@ worker 耗时含 I/O 等待，按 episode 累加。多个进程同时执行，�
 训练时，整个样本窗口应位于一个合格区间，并检查所需字段的有效标记。delay1 action 指向下一帧，无效 state 的前一帧即使为 keep，其 action 仍可能无效。自然末尾的外部 action 目标保留；无法修复时最后一帧归 S1 不合格。
 
 标签输出没有视频，读取器按时间表路径访问原视频。原 EEF 统计没有作为修复后的统计导出；训练归一化应使用有效标签与最终合格时间表重新计算。
+
+## S5：按时间表切分视频
+
+S5 从完成的 `annotations/with_s3/` 或 `annotations/without_s3/` 读取 `timeline.csv.gz` 与 `episodes.csv.gz`，先核对完成标记和 SHA-256，再逐原 episode 合并相邻 `keep` 行。每个 `[start_frame,end_frame_exclusive)` 合格区间得到一个片段，两路相机各生成一个 MP4。中间有不合格区间的原视频会产生多个片段。S5 不增加最短时长限制，也不额外剔除任何帧。
+
+```bash
+# 开发机已有的 Python 环境装有 PyAV 18.1.0 和 imageio-ffmpeg 0.6.0。
+# 新环境还须安装 requirements-s5.lock.txt。
+
+# 只核对全量计划，不写视频：
+bash /mnt/pfs/Data/ryk/egostandard/program/run_s5.sh --plan-only
+
+# 小样本实际切分；输出目录和全量任务分开：
+bash /mnt/pfs/Data/ryk/egostandard/program/run_s5.sh \
+  --episode 3 --workers 1 \
+  --output /mnt/pfs/Data/ryk/egostandard/runs/s5_pilot_episode_3
+
+# 全量 B20 视频导出，必须显式启动：
+bash /mnt/pfs/Data/ryk/egostandard/program/run_s5.sh --workers 64
+
+# 同一配置中断后恢复：
+bash /mnt/pfs/Data/ryk/egostandard/program/run_s5.sh --workers 64 --resume
+
+# 切分跳过 S3 的时间表时，显式选择对应注释与独立的输出目录：
+bash /mnt/pfs/Data/ryk/egostandard/program/run_s5.sh \
+  --annotations /path/to/annotations/without_s3 \
+  --output /mnt/pfs/Data/ryk/egostandard/runs/video_segments_without_s3
+```
+
+默认读取已完成的全量 B20 `with_s3` 时间表，默认输出为 `/mnt/pfs/Data/ryk/egostandard/runs/video_segments_B20_s5/`。`--episode` 可以重复指定；`--max-episodes` 仅导出前 N 条，均应使用独立输出目录。`--workers` 控制 episode 并行数；每个 FFmpeg 编码任务仅用 1 个线程，便于按机器 CPU 数调整并行度。
+
+对每个需要新文件的片段，S5 从两路源 MP4 分别确定实际关键帧：处于完整 GOP 内的 H.264 包直接复制；切点所在的不完整 GOP 用 `libx264` 重编码。片段短于一个完整 GOP 时会整段编码。拼接后逐帧解码输出与原视频：复制部分要求像素完全相同，边界重编码部分要求对应帧 PSNR ≥24 dB，并检查 30 FPS 连续帧号和总帧数。拼接失败时只对该片段整段重编码；再次验证失败则停止，不写完成标记。临时 TS 片段位于输出目录 `.work/`，单个 episode 成功或失败后清理；不会为 S1–S4 各保存一份视频。
+
+原视频完全合格时，清单直接引用原 MP4，避免重复占用空间。原视频完全不合格时，不输出片段。原始视频和 S1 修复标签均保持只读。S5 输出包括：
+
+```text
+video_segments_B20_s5/
+  config.json                 # 输入时间表身份、代码哈希、编码配置
+  videos/camera_reference/   # 需要新导出的参考视角 MP4
+  videos/camera_aux_0/       # 对应辅助视角 MP4
+  checkpoints/               # 每个原 episode 的断点与源身份
+  segments.jsonl             # 每个合格片段的原帧号、双路视频、S1 标签路径与编码方式
+  summary.json               # 文件数、复制/重编码帧数、存储及耗时
+  COMPLETE.json              # 全部片段与汇总通过校验后写入
+```
+
+清单的 `source_start_frame` / `source_end_frame_exclusive` 对应 S1 修复标签中的原始行号；新视频从局部第 0 帧开始。训练时只在单个片段内采样，并继续检查 S1 标签有效标记。由于 `delay1` action 指向下一帧，每段最后一行不能作为需要下一帧状态的训练样本；清单给出 `trainable_delay1_rows_before_validity_flags`，它尚未扣除其他标签有效性限制。
 
 ## 校验与恢复
 

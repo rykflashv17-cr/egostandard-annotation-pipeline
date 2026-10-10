@@ -1,12 +1,13 @@
 {
-  "version": "egostandard-labels-and-timelines-v2-independent-union",
+  "version": "egostandard-annotation-pipeline-v3-with-s5",
   "files": {
     ".gitignore": "6d12bcb953cd09f59c9b3a513dfc031066e8b50e15c6822a737bb17661f00e86",
     "PROVENANCE.json": "ca679d73947ccbb75e5f5333ef570b175a2c0bae570a8c702d0cd8ad8c70e4c7",
-    "README.md": "625084429afa69d769f9cf78a00396d97240eda70067cd76c0682c775d515079",
+    "README.md": "8c2981191efd64bd28e9bc7b0c43c659cf2485a40030443f123cbb6f4424feb6",
     "licenses/MINT_LICENSE": "5a46ae2c42053ace0c565f542c88aac361510fe586acdbc266d5a05c2714bee5",
     "licenses/MINT_SOURCE.json": "14f568212e8954cfc57c7c374ce997f667448d9af7c328eb8c528309115d19dc",
     "pipeline.py": "36be1473e37f69efc4159248857881a848090d94a38c7b9edb7c53515a9fe244",
+    "requirements-s5.lock.txt": "ded9df8b368415a58272e9c7ccdb23b4ffb598b0918828b8d31875dbf2da663e",
     "requirements.lock.txt": "ebf03c06d1db0c2ff00afccdccd4050866a7365c164c3771c1b92afc923c3d57",
     "rules/camera_rule.py": "c6825f004be4298b5ae19f85e90881790d532f574672998b4a3e15114d89bab7",
     "rules/cosine_rule.py": "f866a90317a21e5d1111bd492d5dfe147b4218e5acb087121ae7ff6032babc8d",
@@ -16,8 +17,12 @@
     "rules/scan.py": "dd2743c0e196cade43aa389b861eb9dba7834902a760ee7f0d22ac22503c10b6",
     "run.py": "c4392bbdea67415d9e9b8957ec0d022e658dc5cc81de57c77493e1ec9452dd42",
     "run.sh": "fdc16d79dbeffc7760c2818d69cffb58afdc604602091c3d5c085b60351162af",
+    "run_s5.py": "7485fdea7d7994c6f1ed7cb0c90927fdf4c05e9f2ac50914f924f258929f0199",
+    "run_s5.sh": "563d1e7e5c2eb6eb3d4f5f72b473f4395f1bb8cd314b4e03fb5b8d6572db26c6",
+    "s5.py": "47601e0114ab6a888ebdbc670ebcacdf597e22f92253c2f82bb486b9ee54319b",
     "tests/audit_integration.py": "4cd7a58004c011dd50e51c699c24f0708117b20f02542992fec8114c82c3a101",
     "tests/audit_real_cases.py": "116660515c7016540d3eea88a7d79bed76512a7ddcde0b835a23edae9a3e4fe0",
-    "tests/test_pipeline.py": "0fcbc214a4dbffb12d4ad3ebb9363f9d474bed148dad8804bbede0e32808bb5b"
+    "tests/test_pipeline.py": "0fcbc214a4dbffb12d4ad3ebb9363f9d474bed148dad8804bbede0e32808bb5b",
+    "tests/test_s5.py": "cc1c824e0e4e186cc7b4c32079a17550e99b9c46f670b754f8aa3a6f5347a19f"
   }
 }
